@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ELMS01 Dashboard</title>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script defer src="/static/script.js"></script>
+
+    <style>
+      body {
+        background: #111;
+        color: #eee;
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      h1 {
+        color: #0f0;
+        margin-bottom: 10px;
+      }
+
+      /* 탭 */
+      .tabs {
+        margin-bottom: 20px;
+      }
+      .tab-btn {
+        padding: 10px 20px;
+        background: #222;
+        border: 1px solid #333;
+        color: #eee;
+        cursor: pointer;
+        margin-right: 5px;
+        border-radius: 4px;
+      }
+      .tab-btn.active {
+        background: #0f0;
+        color: #000;
+        font-weight: bold;
+      }
+
+      /* 슬레이브 선택 버튼 */
+      .slave-btn {
+        padding: 6px 14px;
+        background: #222;
+        border: 1px solid #555;
+        color: #eee;
+        cursor: pointer;
+        margin-right: 4px;
+        border-radius: 4px;
+      }
+      .slave-btn.active {
+        background: #09f;
+        color: #000;
+        font-weight: bold;
+      }
+
+      /* 카드 */
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+      .card {
+        background: #222;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #333;
+      }
+      .card h3 {
+        margin-top: 0;
+        color: #0f0;
+      }
+
+      /* 로그 */
+      #serial_log {
+        width: 100%;
+        height: 180px;
+        background: #000;
+        color: #0f0;
+        padding: 10px;
+        border-radius: 8px;
+        font-family: monospace;
+        box-sizing: border-box;
+      }
+
+      /* 제어 버튼 */
+      .ctrl-btn {
+        padding: 6px 12px;
+        background: #333;
+        border: 1px solid #555;
+        color: #eee;
+        cursor: pointer;
+        margin: 2px;
+        border-radius: 4px;
+      }
+      .ctrl-btn:hover {
+        background: #444;
+      }
+      .mode-auto {
+        border-color: #0f0;
+      }
+      .mode-manual {
+        border-color: #f80;
+      }
+
+      select {
+        background: #222;
+        color: #eee;
+        border: 1px solid #555;
+        padding: 5px 8px;
+        border-radius: 4px;
+      }
+      input[type="date"] {
+        background: #222;
+        color: #eee;
+        border: 1px solid #555;
+        padding: 5px;
+        border-radius: 4px;
+      }
+
+      .hidden {
+        display: none;
+      }
+      hr {
+        border-color: #333;
+        margin: 12px 0;
+      }
+
+      /* 스케줄 테이블 */
+      .schedule-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .schedule-table th,
+      .schedule-table td {
+        padding: 10px 14px;
+        border: 1px solid #333;
+        text-align: center;
+      }
+      .schedule-table th {
+        background: #1a1a1a;
+        color: #0f0;
+      }
+      .schedule-table td input[type="time"] {
+        background: #1a1a1a;
+        color: #eee;
+        border: 1px solid #555;
+        padding: 5px 8px;
+        border-radius: 4px;
+        font-size: 1em;
+        width: 100px;
+      }
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 46px;
+        height: 24px;
+      }
+      .toggle-switch input {
+        display: none;
+      }
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background: #444;
+        border-radius: 24px;
+        transition: 0.3s;
+      }
+      .toggle-slider:before {
+        content: "";
+        position: absolute;
+        width: 18px;
+        height: 18px;
+        left: 3px;
+        bottom: 3px;
+        background: #eee;
+        border-radius: 50%;
+        transition: 0.3s;
+      }
+      .toggle-switch input:checked + .toggle-slider {
+        background: #0f0;
+      }
+      .toggle-switch input:checked + .toggle-slider:before {
+        transform: translateX(22px);
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>ELMS01 Dashboard</h1>
+
+    <!-- 탭 버튼 -->
+    <div class="tabs">
+      <button class="tab-btn active" onclick="showTab('dashboard', this)">
+        대시보드
+      </button>
+      <button
+        class="tab-btn"
+        onclick="
+          showTab('control', this);
+          loadGps();
+        "
+      >
+        수동 제어
+      </button>
+      <button class="tab-btn" onclick="showTab('db', this)">DB 조회</button>
+      <button
+        class="tab-btn"
+        onclick="
+          showTab('schedule', this);
+          loadSchedule();
+        "
+      >
+        스케줄
+      </button>
+      <button
+        class="tab-btn"
+        onclick="
+          showTab('settings', this);
+          loadCal();
+        "
+      >
+        설정
+      </button>
+    </div>
+
+    <!-- ════════════════════════════════════════
+     1) 대시보드 탭
+     ════════════════════════════════════════ -->
+    <div id="dashboard_section">
+      <div style="margin-bottom: 8px">
+        연결 상태:
+        <span id="connected_badge" style="color: #f44">Disconnected</span>
+        &nbsp;&nbsp; Last Update: <span id="last_update_text">-</span>
+      </div>
+
+      <!-- 슬레이브 선택 -->
+      <div style="margin-bottom: 12px">
+        보기 슬레이브:
+        <button class="slave-btn active" onclick="selectSlave(1, this)">
+          Slave 1
+        </button>
+        <button class="slave-btn" onclick="selectSlave(2, this)">
+          Slave 2
+        </button>
+        <button class="slave-btn" onclick="selectSlave(3, this)">
+          Slave 3
+        </button>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3>Lane 1</h3>
+          상태: <span id="lane1_on">-</span><br />
+          밝기: <span id="lane1_brightness">-</span><br />
+          전압: <span id="lane1_voltage">-</span> V<br />
+          전류: <span id="lane1_current">-</span> A
+        </div>
+        <div class="card">
+          <h3>Lane 2</h3>
+          상태: <span id="lane2_on">-</span><br />
+          밝기: <span id="lane2_brightness">-</span><br />
+          전압: <span id="lane2_voltage">-</span> V<br />
+          전류: <span id="lane2_current">-</span> A
+        </div>
+        <div class="card">
+          <h3>Lane 3</h3>
+          상태: <span id="lane3_on">-</span><br />
+          밝기: <span id="lane3_brightness">-</span><br />
+          전압: <span id="lane3_voltage">-</span> V<br />
+          전류: <span id="lane3_current">-</span> A
+        </div>
+        <div class="card">
+          <h3>센서 (마스터)</h3>
+          조도 단계: <span id="lux_level">-</span><br />
+          우적 단계: <span id="rain_level">-</span><br />
+          안개 단계: <span id="fog_level">-</span>
+        </div>
+      </div>
+
+      <h3>Raw Status JSON</h3>
+      <pre id="status_raw">데이터 수신 대기중...</pre>
+
+      <h3>Serial Log</h3>
+      <textarea id="serial_log" readonly></textarea>
+    </div>
+
+    <!-- ════════════════════════════════════════
+     2) 수동 제어 탭
+     ════════════════════════════════════════ -->
+    <div id="control_section" class="hidden">
+      <div class="card">
+        <h3>수동 제어</h3>
+
+        <!-- 대상 슬레이브 선택 -->
+        <div style="margin-bottom: 14px">
+          대상 슬레이브:
+          <select id="ctrl_slave_select" onchange="loadCal()">
+            <option value="1">Slave 1</option>
+            <option value="2">Slave 2</option>
+            <option value="3">Slave 3</option>
+          </select>
+        </div>
+
+        <!-- 모드 전환 -->
+        <div style="margin-bottom: 14px">
+          <strong>동작 모드:</strong>&nbsp;
+          <button class="ctrl-btn mode-auto" onclick="setMode(0)">AUTO</button>
+          <button class="ctrl-btn mode-manual" onclick="setMode(1)">
+            MANUAL
+          </button>
+          <span id="mode_result" style="margin-left: 10px; color: #09f">-</span>
+        </div>
+
+        <hr />
+
+        <h4>Lane 1</h4>
+        <button class="ctrl-btn" onclick="sendOnOff(1, 1)">ON</button>
+        <button class="ctrl-btn" onclick="sendOnOff(1, 0)">OFF</button>&nbsp;
+        밝기:
+        <button class="ctrl-btn" onclick="setBrightness(1, 1)">1</button>
+        <button class="ctrl-btn" onclick="setBrightness(1, 2)">2</button>
+        <button class="ctrl-btn" onclick="setBrightness(1, 3)">3</button>
+        <button class="ctrl-btn" onclick="setBrightness(1, 4)">4</button>
+        <div id="lane1_result" style="color: #09f; margin-top: 4px">-</div>
+
+        <hr />
+
+        <h4>Lane 2</h4>
+        <button class="ctrl-btn" onclick="sendOnOff(2, 1)">ON</button>
+        <button class="ctrl-btn" onclick="sendOnOff(2, 0)">OFF</button>&nbsp;
+        밝기:
+        <button class="ctrl-btn" onclick="setBrightness(2, 1)">1</button>
+        <button class="ctrl-btn" onclick="setBrightness(2, 2)">2</button>
+        <button class="ctrl-btn" onclick="setBrightness(2, 3)">3</button>
+        <button class="ctrl-btn" onclick="setBrightness(2, 4)">4</button>
+        <div id="lane2_result" style="color: #09f; margin-top: 4px">-</div>
+
+        <hr />
+
+        <h4>Lane 3</h4>
+        <button class="ctrl-btn" onclick="sendOnOff(4, 1)">ON</button>
+        <button class="ctrl-btn" onclick="sendOnOff(4, 0)">OFF</button>&nbsp;
+        밝기:
+        <button class="ctrl-btn" onclick="setBrightness(3, 1)">1</button>
+        <button class="ctrl-btn" onclick="setBrightness(3, 2)">2</button>
+        <button class="ctrl-btn" onclick="setBrightness(3, 3)">3</button>
+        <button class="ctrl-btn" onclick="setBrightness(3, 4)">4</button>
+        <div id="lane3_result" style="color: #09f; margin-top: 4px">-</div>
+      </div>
+
+      <div class="card">
+        <h3>GPS 위치 (파워보드)</h3>
+        <p style="color: #aaa; margin-bottom: 12px">
+          가로등은 고정 설치물이므로 상시 조회하지 않고, 버튼을 눌렀을 때만
+          파워보드에 위치를 요청합니다.
+        </p>
+        <button class="ctrl-btn" onclick="requestGps()">위치 요청</button>
+        <div id="gps_result" style="color: #09f; margin-top: 8px">-</div>
+        <div style="margin-top: 10px">
+          상태: <span id="gps_fix">-</span><br />
+          위도: <span id="gps_lat">-</span><br />
+          경도: <span id="gps_lon">-</span><br />
+          마지막 업데이트: <span id="gps_updated">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+     3) DB 조회 탭
+     ════════════════════════════════════════ -->
+    <div id="db_section" class="hidden">
+      <div class="card">
+        <h3>DB 조회</h3>
+
+        <label>슬레이브:</label>
+        <select id="db_slave_select">
+          <option value="">전체</option>
+          <option value="1">Slave 1</option>
+          <option value="2">Slave 2</option>
+          <option value="3">Slave 3</option>
+        </select>
+        <br /><br />
+
+        <label>시작 날짜:</label>
+        <input type="date" id="db_from" />
+        &nbsp;
+        <label>종료 날짜:</label>
+        <input type="date" id="db_to" />
+        <br /><br />
+
+        <button class="ctrl-btn" onclick="loadHistory()">조회</button>
+        <button class="ctrl-btn" onclick="downloadCSV()">CSV 다운로드</button>
+
+        <pre
+          id="db_result"
+          style="margin-top: 15px; max-height: 400px; overflow: auto"
+        >
+조회 결과 없음</pre
+        >
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+     4) 스케줄 탭
+     ════════════════════════════════════════ -->
+    <div id="schedule_section" class="hidden">
+      <div class="card">
+        <h3>점등 / 소등 시간 설정</h3>
+        <p style="color: #aaa; margin-bottom: 16px">
+          자동 스케줄이 활성화된 슬레이브는 설정한 시간에 자동으로
+          점등/소등됩니다.
+        </p>
+
+        <table class="schedule-table">
+          <thead>
+            <tr>
+              <th>슬레이브</th>
+              <th>점등 시간</th>
+              <th>소등 시간</th>
+              <th>자동 스케줄</th>
+              <th>적용</th>
+            </tr>
+          </thead>
+          <tbody id="schedule_tbody">
+            <tr>
+              <td colspan="5" style="text-align: center; color: #aaa">
+                로딩 중...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div id="schedule_result" style="margin-top: 14px; color: #09f"></div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+     5) 설정 탭
+     ════════════════════════════════════════ -->
+    <div id="settings_section" class="hidden">
+      <div class="card">
+        <h3>튜닝 (Lane 초기 전압 보정)</h3>
+        <p style="color: #aaa; margin-bottom: 12px">
+          Lane·밝기 레벨별 초기 전압 보정 스텝. MCU는 이 값을 RAM에만 들고
+          있어서, 여기서 "적용"한 값은 Pi에 저장해뒀다가 MCU 재부팅 시
+          자동으로 다시 전송됩니다.
+        </p>
+
+        <div style="margin-bottom: 14px">
+          대상 슬레이브:
+          <select id="cal_slave_select" onchange="loadCal()">
+            <option value="1">Slave 1</option>
+            <option value="2">Slave 2</option>
+            <option value="3">Slave 3</option>
+          </select>
+        </div>
+
+        <table class="schedule-table">
+          <thead>
+            <tr>
+              <th>Lane</th>
+              <th>Level</th>
+              <th>현재 Step</th>
+              <th>새 Step</th>
+              <th>적용</th>
+              <th>조회</th>
+            </tr>
+          </thead>
+          <tbody id="cal_tbody">
+            <tr>
+              <td colspan="6" style="text-align: center; color: #aaa">
+                로딩 중...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div id="cal_result" style="margin-top: 10px; color: #09f">-</div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+[Unit]
+Description=ELMS Backend
+After=network.target
+
+[Service]
+User=jb
+WorkingDirectory=/home/jb/Dev/ELMS/backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/jb/Dev/ELMS/backend/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
