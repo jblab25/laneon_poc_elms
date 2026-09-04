@@ -15,6 +15,8 @@ import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, request, send_from_directory, make_response
 from flask_socketio import SocketIO
 
+import env_fusion
+
 # ──────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────
@@ -39,6 +41,19 @@ CMD_CAL_SET     = 0x14
 CMD_CAL_GET     = 0x15
 CMD_CAL_RESP    = 0x16
 CMD_BOOT_NOTIFY = 0x17
+
+# PoC 전용: JPB(파워보드) 상태 + JSB(센서보드) Raw 데이터 청크
+CMD_JPB_STATUS      = 0x30
+CMD_JSB_DATA_CHUNK  = 0x31
+
+# PoC 전용: ELMS Fusion 결과(L/R/F) → JPB 상태 표시/진단용 (제어용 아님).
+# 0x12는 기존 ELMS 코드와 실기 Hex Dump 양쪽에서 미사용 확인됨(2026-09-03 감사).
+CMD_ENV_STATUS = 0x12
+
+JSB_CHUNK_TIMEOUT_SEC = 3.0
+
+# 이번 PoC는 JPB 1대 구성이라 slave_id는 항상 1
+SLAVE_ID = 1
 
 # 레벨별 기본 캘리브레이션 스텝 (MCU 리셋 시 초기값과 동일)
 CAL_DEFAULT_STEPS = {1: 98, 2: 95, 3: 92, 4: 88}
@@ -178,6 +193,10 @@ def _handle_frame(cmd: int, payload: bytes):
         _handle_cal_resp(payload)
     elif cmd == CMD_BOOT_NOTIFY:
         _handle_boot_notify(payload)
+    elif cmd == CMD_JPB_STATUS:
+        _handle_jpb_status(payload)
+    elif cmd == CMD_JSB_DATA_CHUNK:
+        _handle_jsb_chunk(payload)
     elif cmd == CMD_ACK:
         pass
 
@@ -224,6 +243,336 @@ def _handle_status(payload: bytes):
     _save_status(status)
     mqtt_publish(status)
     socketio.emit('status_update', status)
+
+
+# ──────────────────────────────────────────
+# PoC — JPB STATUS (0x30) / JSB DATA CHUNK (0x31)
+# ──────────────────────────────────────────
+_state_lock = threading.Lock()
+latest_jpb_status = {}
+latest_jsb_sensor = {}
+
+_jsb_chunk_lock = threading.Lock()
+_jsb_reassembly = {
+    'group_seq':    None,
+    'total_chunks': None,
+    'chunks':       {},
+    'tainted':      False,
+    'started_at':   None,
+}
+_jsb_diag = {
+    'chunk_error_count':      0,
+    'incomplete_group_count': 0,
+    'last_complete_group_seq': None,
+    'last_group_seq':         None,
+    'last_chunks_received':   0,
+    'last_total_chunks':      0,
+    'last_raw_packet_size':   0,
+}
+
+
+def _handle_jpb_status(payload: bytes):
+    """
+    JPB_STATUS(0x30) 페이로드 파싱 (29 bytes)
+    JPB retarget.c/h 소스가 없어 실기로 byte order를 직접 확인하지 못했다.
+    기존 ELMS 프로토콜 관례(멀티바이트 필드 전부 little-endian, 패딩 없음)를
+    그대로 적용했으며, 아래 오프셋 합산이 스펙의 29바이트와 정확히 일치해
+    구조적으로는 맞아떨어진다 — 실기 Hex Dump로 재검증할 것.
+    """
+    if len(payload) < 29:
+        print(f'[JPB_STATUS] payload 길이 부족: {len(payload)}')
+        return
+
+    jpb_seq = struct.unpack_from('<I', payload, 0)[0]
+
+    lanes = []
+    off = 4
+    for _ in range(3):
+        active      = payload[off]
+        bright      = payload[off + 1]
+        voltage_mv, current_ma = struct.unpack_from('<HH', payload, off + 2)
+        lanes.append({
+            'active':       bool(active),
+            'bright_level': bright,
+            'voltage_mv':   voltage_mv,
+            'current_ma':   current_ma,
+        })
+        off += 6
+
+    jsb_link_valid = payload[off]
+    jsb_seq         = struct.unpack_from('<I', payload, off + 1)[0]
+    jsb_age_ms      = struct.unpack_from('<H', payload, off + 5)[0]
+
+    status = {
+        'jpb_seq':        jpb_seq,
+        'lane1':          lanes[0],
+        'lane2':          lanes[1],
+        'lane3':          lanes[2],
+        'jsb_link_valid': bool(jsb_link_valid),
+        'jsb_seq':        jsb_seq,
+        'jsb_age_ms':     jsb_age_ms,
+        'timestamp':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    global latest_jpb_status
+    with _state_lock:
+        latest_jpb_status = status
+    socketio.emit('jpb_status_update', status)
+
+
+def _handle_jsb_chunk(payload: bytes):
+    """
+    JSB_DATA_CHUNK(0x31) 페이로드: GROUP_SEQ(4) + CHUNK_INDEX(1) + TOTAL_CHUNKS(1) + DATA(가변)
+    JSB의 1초 ASCII Raw Packet을 JPB가 여러 프레임으로 잘라 보낸 것을 GROUP_SEQ 기준으로
+    재조립한다. 청크 누락/중복/group_seq 변경/total_chunks 불일치는 정상 완료로 처리하지
+    않고 진단 카운터만 남긴다 — 별도 retry 프로토콜은 만들지 않는다.
+    """
+    if len(payload) < 6:
+        _jsb_diag['chunk_error_count'] += 1
+        return
+
+    group_seq, chunk_index, total_chunks = struct.unpack_from('<IBB', payload, 0)
+    data = payload[6:]
+
+    with _jsb_chunk_lock:
+        r = _jsb_reassembly
+        now = time.time()
+
+        if r['group_seq'] != group_seq:
+            if r['group_seq'] is not None and len(r['chunks']) < (r['total_chunks'] or 0):
+                _jsb_diag['incomplete_group_count'] += 1
+            r['group_seq']    = group_seq
+            r['total_chunks'] = total_chunks
+            r['chunks']       = {}
+            r['tainted']      = False
+            r['started_at']   = now
+
+        if total_chunks != r['total_chunks']:
+            _jsb_diag['chunk_error_count'] += 1
+            r['tainted'] = True
+
+        if chunk_index in r['chunks']:
+            _jsb_diag['chunk_error_count'] += 1
+            r['tainted'] = True
+        else:
+            r['chunks'][chunk_index] = data
+
+        _jsb_diag['last_group_seq']       = group_seq
+        _jsb_diag['last_chunks_received'] = len(r['chunks'])
+        _jsb_diag['last_total_chunks']    = r['total_chunks']
+
+        complete = (
+            not r['tainted']
+            and r['total_chunks']
+            and len(r['chunks']) == r['total_chunks']
+            and all(i in r['chunks'] for i in range(r['total_chunks']))
+        )
+
+        if complete:
+            raw = b''.join(r['chunks'][i] for i in range(r['total_chunks']))
+            _jsb_diag['last_complete_group_seq'] = group_seq
+            _jsb_diag['last_raw_packet_size']    = len(raw)
+            r['group_seq']    = None
+            r['total_chunks'] = None
+            r['chunks']       = {}
+            r['tainted']      = False
+            r['started_at']   = None
+            _process_jsb_raw_packet(raw, group_seq)
+
+
+def jsb_chunk_timeout_checker():
+    """재조립 중인 group이 JSB_CHUNK_TIMEOUT_SEC 이상 완료되지 않으면 폐기한다."""
+    while True:
+        time.sleep(1)
+        with _jsb_chunk_lock:
+            r = _jsb_reassembly
+            if r['started_at'] and (time.time() - r['started_at']) > JSB_CHUNK_TIMEOUT_SEC:
+                _jsb_diag['incomplete_group_count'] += 1
+                r['group_seq']    = None
+                r['total_chunks'] = None
+                r['chunks']       = {}
+                r['tainted']      = False
+                r['started_at']   = None
+
+
+def _int(fields: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(fields[key])
+    except (KeyError, ValueError):
+        return default
+
+
+def _parse_jsb_fields(fields: dict) -> dict:
+    """JSB ASCII Raw Packet의 key:value 목록을 그룹별로 구조화한다."""
+    ncv_count = min(_int(fields, 'NCV_COUNT'), 5)
+    ncv = []
+    for i in range(ncv_count):
+        p = f'NCV{i}_'
+        ncv.append({k: _int(fields, p + k) for k in
+                    ('R1L1', 'R2L1', 'R1L2', 'R2L2', 'R1DC', 'R2DC', 'LS1', 'LS2', 'LS3', 'LS4')})
+
+    bme_valid = _int(fields, 'BME_VALID')
+    temp_x10  = _int(fields, 'TEMP_X10')
+    hum_x10   = _int(fields, 'HUM_X10')
+    pres_x10  = _int(fields, 'PRES_X10')
+
+    mic_count = min(_int(fields, 'MIC_COUNT'), 2)
+    mic = []
+    for i in range(mic_count):
+        mic.append({
+            'rms':  _int(fields, f'MIC{i}_RMS'),
+            'peak': _int(fields, f'MIC{i}_PEAK'),
+        })
+
+    tcs_valid = _int(fields, 'TCS_VALID')
+    tcs_keys  = (['FZ', 'FY', 'FXL', 'NIR', 'GAIN', 'SAT']
+                 + [f'F{i}' for i in range(1, 9)]
+                 + [f'VIS{i}' for i in range(1, 7)])
+    tcs = {k: _int(fields, 'TCS_' + k) for k in tcs_keys}
+
+    return {
+        'pver':   fields.get('PVER'),
+        'seq':    _int(fields, 'SEQ'),
+        'uptime': _int(fields, 'UPTIME'),
+        'gps': {
+            'valid':  bool(_int(fields, 'GPS_VALID')),
+            'lat_e6': _int(fields, 'LAT_E6'),
+            'lon_e6': _int(fields, 'LON_E6'),
+            'utc_h':  _int(fields, 'UTC_H'),
+            'utc_m':  _int(fields, 'UTC_M'),
+            'utc_s':  _int(fields, 'UTC_S'),
+        },
+        'ncv_count': ncv_count,
+        'ncv':       ncv,
+        'bme': {
+            'valid':    bool(bme_valid),
+            'temp_x10': temp_x10,
+            'hum_x10':  hum_x10,
+            'pres_x10': pres_x10,
+            'temp':     round(temp_x10 / 10.0, 1),
+            'hum':      round(hum_x10 / 10.0, 1),
+            'pres':     round(pres_x10 / 10.0, 1),
+        },
+        'mic_count': mic_count,
+        'mic':       mic,
+        'tcs':       {'valid': bool(tcs_valid), **tcs},
+        'raw_fields': fields,
+    }
+
+
+def _process_jsb_raw_packet(raw: bytes, group_seq: int):
+    try:
+        text = raw.decode('ascii', errors='replace').strip()
+    except Exception as e:
+        _jsb_diag['chunk_error_count'] += 1
+        print(f'[JSB] ASCII 디코딩 실패: {e}')
+        return
+
+    fields = {}
+    for token in text.replace('\r', '').replace('\n', '').split(','):
+        token = token.strip()
+        if not token or ':' not in token:
+            continue
+        k, v = token.split(':', 1)
+        fields[k.strip()] = v.strip()
+
+    sensor = _parse_jsb_fields(fields)
+    sensor['group_seq']       = group_seq
+    sensor['raw_packet_size'] = len(raw)
+    sensor['raw_text']        = text
+    sensor['timestamp']       = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    try:
+        fusion = env_fusion.process_jsb_packet(sensor)
+        sensor['fusion'] = fusion
+        send_env_status(SLAVE_ID, fusion['light']['level'], fusion['rain']['level'], fusion['fog']['level'])
+        auto_decision_step(fusion)
+    except Exception as e:
+        print(f'[FUSION] 처리 실패: {e}')
+
+    global latest_jsb_sensor
+    with _state_lock:
+        latest_jsb_sensor = sensor
+    socketio.emit('jsb_sensor_update', sensor)
+
+
+# ──────────────────────────────────────────
+# JPB 공통 송신 함수 — MANUAL Route와 AUTO Decision이 동일 함수를 사용한다.
+# Wire Protocol/기존 MANUAL API 동작은 변경하지 않는다(기존 payload 그대로).
+# ──────────────────────────────────────────
+def send_mode(slave_id: int, mode: int):
+    uart_send(CMD_MODE, bytes([slave_id, mode]))
+
+
+def send_lane_onoff(slave_id: int, lanes: int, on: int):
+    uart_send(CMD_ONOFF, bytes([slave_id, lanes, on]))
+
+
+def send_lane_brightness(slave_id: int, lane: int, value: int):
+    uart_send(CMD_BRIGHTNESS, bytes([slave_id, lane, value]))
+
+
+def send_env_status(slave_id: int, light_level: int, rain_level: int, fog_level: int):
+    """CMD_ENV_STATUS(0x12) — JPB 상태 표시/진단 전용. 실제 Lane 제어에는 쓰이지 않는다."""
+    uart_send(CMD_ENV_STATUS, bytes([slave_id, light_level, rain_level, fog_level]))
+
+
+# ──────────────────────────────────────────
+# PoC AUTO Decision — env_level = max(L,R,F), 0=OFF, 1~4=ON+Brightness
+# MANUAL 모드에서는 계산/모니터링만 하고 절대 명령을 발행하지 않는다(안전조건).
+# Target이 이전과 같으면 아무 것도 보내지 않는다(중복명령 금지).
+# ──────────────────────────────────────────
+current_control_mode = 'MANUAL'  # 서버가 기억하는 현재 모드. 기동 시 안전하게 MANUAL로 시작
+_auto_lock = threading.Lock()
+_auto_state = {
+    'env_level':     0,
+    'target_onoff':  0,
+    'target_bright': 0,
+    'reason':        '',
+    'sent_onoff':    None,  # AUTO가 실제로 마지막에 보낸 ON/OFF (None=아직 없음)
+    'sent_bright':   None,  # AUTO가 실제로 마지막에 보낸 Brightness
+}
+
+
+def auto_decision_step(fusion: dict):
+    light = fusion['light']['level']
+    rain  = fusion['rain']['level']
+    fog   = fusion['fog']['level']
+    env_level = max(light, rain, fog)
+
+    target_onoff  = 1 if env_level >= 1 else 0
+    target_bright = env_level if env_level >= 1 else 0
+    reason = f'env_level={env_level} (L={light} R={rain} F={fog})'
+
+    with _auto_lock:
+        _auto_state['env_level']     = env_level
+        _auto_state['target_onoff']  = target_onoff
+        _auto_state['target_bright'] = target_bright
+        _auto_state['reason']        = reason
+
+        if current_control_mode != 'AUTO':
+            return  # MANUAL에서는 계산만 하고 절대 송신하지 않는다
+
+        prev_onoff  = _auto_state['sent_onoff']
+        prev_bright = _auto_state['sent_bright']
+
+        if target_onoff != prev_onoff:
+            if target_onoff == 1:
+                # OFF->ON: Lane1~3 Brightness 먼저, 그 다음 CMD_ONOFF(lanes=0x07, ON)
+                for lane in (1, 2, 3):
+                    send_lane_brightness(SLAVE_ID, lane, target_bright)
+                send_lane_onoff(SLAVE_ID, 0x07, 1)
+                _auto_state['sent_bright'] = target_bright
+            else:
+                # ON->OFF: CMD_ONOFF(lanes=0x07, OFF)만 전송
+                send_lane_onoff(SLAVE_ID, 0x07, 0)
+            _auto_state['sent_onoff'] = target_onoff
+        elif target_onoff == 1 and target_bright != prev_bright:
+            # 이미 ON인 상태에서 밝기만 바뀐 경우 -> ON/OFF는 재전송하지 않는다
+            for lane in (1, 2, 3):
+                send_lane_brightness(SLAVE_ID, lane, target_bright)
+            _auto_state['sent_bright'] = target_bright
+        # else: target 변화 없음 -> 아무 것도 보내지 않는다
 
 
 # ──────────────────────────────────────────
@@ -549,7 +898,7 @@ def api_onoff():
     slave_id = int(d.get('slave_id', 1))
     lanes    = int(d.get('lanes', 7))
     on       = int(d.get('on', 1))
-    uart_send(CMD_ONOFF, bytes([slave_id, lanes, on]))
+    send_lane_onoff(slave_id, lanes, on)
     return jsonify({'ok': True})
 
 
@@ -559,16 +908,26 @@ def api_brightness():
     slave_id = int(d.get('slave_id', 1))
     lane     = int(d.get('lane', 1))
     value    = int(d.get('value', 2))
-    uart_send(CMD_BRIGHTNESS, bytes([slave_id, lane, value]))
+    send_lane_brightness(slave_id, lane, value)
     return jsonify({'ok': True})
 
 
 @app.route('/api/control/mode', methods=['POST'])
 def api_mode():
+    global current_control_mode
     d        = request.json
     slave_id = int(d.get('slave_id', 1))
     mode     = int(d.get('mode', 0))
-    uart_send(CMD_MODE, bytes([slave_id, mode]))
+    send_mode(slave_id, mode)
+
+    new_mode = 'AUTO' if mode == 0 else 'MANUAL'
+    with _auto_lock:
+        if new_mode == 'AUTO' and current_control_mode != 'AUTO':
+            # AUTO 진입 시 이전 송신 이력을 리셋 -> MANUAL 동안 실제 상태가 바뀌었을 수
+            # 있으므로 재진입 직후 현재 목표를 반드시 한 번 명시적으로 재전송한다.
+            _auto_state['sent_onoff']  = None
+            _auto_state['sent_bright'] = None
+        current_control_mode = new_mode
     return jsonify({'ok': True})
 
 
@@ -725,6 +1084,46 @@ def api_schedule_set():
 
 
 # ──────────────────────────────────────────
+# REST API — PoC Monitor (JPB STATUS / JSB SENSOR)
+# ──────────────────────────────────────────
+@app.route('/api/monitor')
+def api_monitor():
+    with _state_lock:
+        jpb = dict(latest_jpb_status) if latest_jpb_status else None
+        jsb = dict(latest_jsb_sensor) if latest_jsb_sensor else None
+    with _jsb_chunk_lock:
+        diag = dict(_jsb_diag)
+
+    with _auto_lock:
+        auto = dict(_auto_state)
+        auto['mode'] = current_control_mode
+
+    actual_onoff = None
+    actual_bright = None
+    control_match = None
+    if jpb is not None:
+        lanes_active = [jpb['lane1']['active'], jpb['lane2']['active'], jpb['lane3']['active']]
+        lanes_bright = [jpb['lane1']['bright_level'], jpb['lane2']['bright_level'], jpb['lane3']['bright_level']]
+        if all(lanes_active):
+            actual_onoff = 1
+        elif not any(lanes_active):
+            actual_onoff = 0
+        else:
+            actual_onoff = -1  # 3개 Lane 상태가 혼재(전환 중 과도상태 등)
+        actual_bright = lanes_bright[0] if len(set(lanes_bright)) == 1 else -1
+
+        control_match = (actual_onoff == auto['target_onoff']) and (
+            auto['target_onoff'] == 0 or actual_bright == auto['target_bright']
+        )
+
+    auto['actual_onoff']   = actual_onoff
+    auto['actual_bright']  = actual_bright
+    auto['control_match']  = control_match
+
+    return jsonify({'jpb': jpb, 'jsb': jsb, 'jsb_diag': diag, 'auto': auto})
+
+
+# ──────────────────────────────────────────
 # 정적 파일 (대시보드)
 # ──────────────────────────────────────────
 @app.route('/')
@@ -759,6 +1158,7 @@ if __name__ == '__main__':
     threading.Thread(target=uart_reader,     daemon=True).start()
     threading.Thread(target=status_poller,   daemon=True).start()
     threading.Thread(target=schedule_checker, daemon=True).start()
+    threading.Thread(target=jsb_chunk_timeout_checker, daemon=True).start()
     resend_all_calibration()
     print('[SERVER] http://0.0.0.0:5000 시작')
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)

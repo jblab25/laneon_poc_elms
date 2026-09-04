@@ -225,6 +225,15 @@
       >
         설정
       </button>
+      <button
+        class="tab-btn"
+        onclick="
+          showTab('poc_monitor', this);
+          loadMonitor();
+        "
+      >
+        PoC 모니터
+      </button>
     </div>
 
     <!-- ════════════════════════════════════════
@@ -480,6 +489,139 @@
         </table>
         <div id="cal_result" style="margin-top: 10px; color: #09f">-</div>
       </div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+     6) PoC 모니터 탭 (JPB STATUS 0x30 / JSB SENSOR 0x31)
+     ════════════════════════════════════════ -->
+    <div id="poc_monitor_section" class="hidden">
+      <div class="grid">
+        <div class="card">
+          <h3>JPB</h3>
+          SEQ : <span id="poc_jpb_seq">-</span><br />
+          JSB LINK : <span id="poc_jsb_link">-</span><br />
+          JSB SEQ : <span id="poc_jsb_seq">-</span><br />
+          JSB AGE : <span id="poc_jsb_age">-</span> ms
+        </div>
+        <div class="card">
+          <h3>Lane 1</h3>
+          ACTIVE : <span id="poc_lane1_active">-</span><br />
+          BRIGHT : <span id="poc_lane1_bright">-</span><br />
+          VOLTAGE : <span id="poc_lane1_voltage">-</span> V<br />
+          CURRENT : <span id="poc_lane1_current">-</span> mA
+        </div>
+        <div class="card">
+          <h3>Lane 2</h3>
+          ACTIVE : <span id="poc_lane2_active">-</span><br />
+          BRIGHT : <span id="poc_lane2_bright">-</span><br />
+          VOLTAGE : <span id="poc_lane2_voltage">-</span> V<br />
+          CURRENT : <span id="poc_lane2_current">-</span> mA
+        </div>
+        <div class="card">
+          <h3>Lane 3</h3>
+          ACTIVE : <span id="poc_lane3_active">-</span><br />
+          BRIGHT : <span id="poc_lane3_bright">-</span><br />
+          VOLTAGE : <span id="poc_lane3_voltage">-</span> V<br />
+          CURRENT : <span id="poc_lane3_current">-</span> mA
+        </div>
+
+        <div class="card">
+          <h3>JSB SENSOR</h3>
+          NCV_COUNT : <span id="poc_ncv_count">-</span><br />
+          BME : <span id="poc_bme_valid">-</span><br />
+          TEMP : <span id="poc_temp">-</span> °C<br />
+          HUMIDITY : <span id="poc_hum">-</span> %<br />
+          PRESSURE : <span id="poc_pres">-</span> hPa<br />
+          MIC_COUNT : <span id="poc_mic_count">-</span><br />
+          TCS : <span id="poc_tcs_valid">-</span>
+        </div>
+        <div class="card">
+          <h3>GPS</h3>
+          상태 : <span id="poc_gps_fix">-</span><br />
+          LAT/LON : <span id="poc_gps_latlon">-</span>
+        </div>
+        <div class="card">
+          <h3>내부 진단</h3>
+          GROUP_SEQ : <span id="poc_group_seq">-</span><br />
+          CHUNKS : <span id="poc_chunks">-</span><br />
+          RAW_PACKET_SIZE : <span id="poc_raw_size">-</span> bytes<br />
+          chunk_error_count : <span id="poc_chunk_error">-</span><br />
+          incomplete_group_count : <span id="poc_incomplete">-</span><br />
+          last_complete_group_seq : <span id="poc_last_complete">-</span>
+        </div>
+      </div>
+
+      <h3>AUTO Control</h3>
+      <div class="grid">
+        <div class="card">
+          <h3>AUTO Decision</h3>
+          AUTO_MODE : <span id="ac_mode">-</span><br />
+          ENV_LEVEL : <span id="ac_env_level">-</span><br />
+          CONTROL_REASON : <span id="ac_reason">-</span>
+        </div>
+        <div class="card">
+          <h3>Target (ELMS 계산값)</h3>
+          TARGET_ONOFF : <span id="ac_target_onoff">-</span><br />
+          TARGET_BRIGHTNESS : <span id="ac_target_bright">-</span>
+        </div>
+        <div class="card">
+          <h3>Actual (JPB 0x30 실측)</h3>
+          ACTUAL_ONOFF : <span id="ac_actual_onoff">-</span><br />
+          ACTUAL_BRIGHTNESS : <span id="ac_actual_bright">-</span>
+        </div>
+        <div class="card">
+          <h3>일치 여부</h3>
+          CONTROL_MATCH : <span id="ac_match">-</span>
+        </div>
+      </div>
+
+      <h3>Environment Fusion (L / R / F) — 제어 명령 미발행, 계산·모니터 전용</h3>
+      <div class="grid">
+        <div class="card">
+          <h3>Light</h3>
+          RAW(LS2) : <span id="fz_light_raw">-</span><br />
+          FILTERED(EMA) : <span id="fz_light_filtered">-</span><br />
+          TARGET : <span id="fz_light_target">-</span><br />
+          LEVEL(committed) : <span id="fz_light_level">-</span>
+        </div>
+        <div class="card">
+          <h3>Rain</h3>
+          WET_DISTANCE : <span id="fz_rain_wet_distance">-</span><br />
+          WET_PRESENT : <span id="fz_rain_wet_present">-</span><br />
+          EVENT_STATE : <span id="fz_rain_event_state">-</span><br />
+          EVENT_COUNT(window) : <span id="fz_rain_event_count">-</span><br />
+          TARGET : <span id="fz_rain_target">-</span><br />
+          LEVEL(committed) : <span id="fz_rain_level">-</span>
+        </div>
+        <div class="card">
+          <h3>Fog</h3>
+          HUMID_READY(Gate) : <span id="fz_fog_humid_ready">-</span><br />
+          SCORE : <span id="fz_fog_score">-</span><br />
+          TARGET : <span id="fz_fog_target">-</span><br />
+          LEVEL(committed) : <span id="fz_fog_level">-</span>
+        </div>
+        <div class="card">
+          <h3>NCV Feature</h3>
+          RS_MEAN : <span id="fz_rs_mean">-</span><br />
+          RS_VARIATION : <span id="fz_rs_variation">-</span><br />
+          RS_IMPULSE_RATIO : <span id="fz_rs_impulse">-</span><br />
+          RS_PERSISTENCE : <span id="fz_rs_persistence">-</span>
+        </div>
+        <div class="card">
+          <h3>MIC Feature</h3>
+          RMS : <span id="fz_mic_rms">-</span><br />
+          PEAK : <span id="fz_mic_peak">-</span><br />
+          STATE : <span id="fz_mic_state">-</span>
+        </div>
+      </div>
+
+      <h3>NCV76124 Samples</h3>
+      <pre id="poc_ncv_raw">데이터 수신 대기중...</pre>
+
+      <h3>JSB Raw Packet</h3>
+      <pre id="poc_jsb_raw" style="max-height: 240px; overflow: auto"
+        >데이터 수신 대기중...</pre
+      >
     </div>
   </body>
 </html>

@@ -1,0 +1,56 @@
+{
+  "light": {
+    "threshold_l0_l1": 3500,
+    "threshold_l1_l2": 2500,
+    "threshold_l2_l3": 1200,
+    "threshold_l3_l4": 400,
+    "hysteresis": 100,
+    "hold_ms": 3000,
+    "ema_alpha": 0.25
+  },
+  "rain": {
+    "baseline_ir11": -5001,
+    "baseline_ir12": -5480,
+    "baseline_ir21": -6189,
+    "baseline_ir22": -5612,
+    "wet_enter_threshold": 300,
+    "wet_exit_threshold": 180,
+    "wet_enter_hold_ms": 3000,
+    "dry_return_hold_ms": 5000,
+    "event_enter_threshold": 500,
+    "event_exit_threshold": 200,
+    "event_rearm_ms": 400,
+    "activity_window_ms": 10000,
+    "r2_event_count": 1,
+    "r3_event_count": 3,
+    "r4_event_count": 6,
+    "level_hold_ms": 3000
+  },
+  "fog": {
+    "humid_high_rh": 88.0,
+    "humid_low_rh": 83.0,
+    "humid_high_hold_ms": 30000,
+    "humid_low_hold_ms": 60000,
+    "w_persistence": 1.5,
+    "w_low_variation": 1.0,
+    "w_mic_quiet": 0.5,
+    "w_impulse_penalty": 1.5,
+    "score_up": [0.6, 1.2, 1.9, 2.6],
+    "score_down": [0.4, 1.0, 1.7, 2.4],
+    "hold_ms": 6000,
+    "presence_floor": 300.0,
+    "var_norm": 500.0,
+    "impulse_k": 2.5
+  },
+  "ncv": {
+    "window_n": 15,
+    "sample_interval_ms": 200
+  },
+  "mic": {
+    "sample_interval_ms": 500,
+    "baseline_window_n": 5,
+    "impulse_ratio": 3.0,
+    "active_ratio": 1.5,
+    "continuous_hold_ms": 2000
+  }
+}

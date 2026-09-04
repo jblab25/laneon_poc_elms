@@ -6,6 +6,9 @@ const socket = io();
 let selectedSlave = 1;          // 대시보드에 표시할 슬레이브
 const latestStatus = {};         // slave_id → 최신 상태 캐시
 
+let latestJpbStatus = null;      // PoC: 최신 JPB STATUS(0x30)
+let latestJsbSensor = null;      // PoC: 최신 JSB SENSOR(0x31 재조립 결과)
+
 /* ──────────────────────────────────────────
    Socket.IO 이벤트
    ────────────────────────────────────────── */
@@ -32,6 +35,16 @@ socket.on('cal_update', (data) => {
     if (cell) cell.innerText = data.step;
     document.getElementById('cal_result').innerText =
         `✔ Lane${data.lane} Level${data.level} 조회 완료 — ${data.step}`;
+});
+
+socket.on('jpb_status_update', (data) => {
+    latestJpbStatus = data;
+    _renderJpbStatus(data);
+});
+
+socket.on('jsb_sensor_update', (data) => {
+    latestJsbSensor = data;
+    _renderJsbSensor(data);
 });
 
 socket.on('status_update', (data) => {
@@ -71,7 +84,7 @@ function _updateCards(d) {
    탭 전환
    ────────────────────────────────────────── */
 function showTab(tab, btn) {
-    ['dashboard', 'control', 'db', 'schedule', 'settings'].forEach(t => {
+    ['dashboard', 'control', 'db', 'schedule', 'settings', 'poc_monitor'].forEach(t => {
         document.getElementById(t + '_section').classList.add('hidden');
     });
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -331,4 +344,133 @@ function saveSchedule(slaveId) {
     .catch(() => {
         document.getElementById('schedule_result').innerText = '✘ 저장 실패';
     });
+}
+
+/* ──────────────────────────────────────────
+   PoC 모니터 — JPB STATUS(0x30) / JSB SENSOR(0x31)
+   ────────────────────────────────────────── */
+function _renderJpbStatus(d) {
+    document.getElementById('poc_jpb_seq').innerText   = d.jpb_seq;
+    document.getElementById('poc_jsb_link').innerText  = d.jsb_link_valid ? 'OK' : 'NO LINK';
+    document.getElementById('poc_jsb_seq').innerText   = d.jsb_seq;
+    document.getElementById('poc_jsb_age').innerText   = d.jsb_age_ms;
+
+    ['lane1', 'lane2', 'lane3'].forEach((key, i) => {
+        const n    = i + 1;
+        const lane = d[key];
+        document.getElementById(`poc_lane${n}_active`).innerText  = lane.active ? 'ON' : 'OFF';
+        document.getElementById(`poc_lane${n}_bright`).innerText  = lane.bright_level;
+        document.getElementById(`poc_lane${n}_voltage`).innerText = (lane.voltage_mv / 1000).toFixed(2);
+        document.getElementById(`poc_lane${n}_current`).innerText = lane.current_ma;
+    });
+}
+
+function _renderJsbSensor(d) {
+    document.getElementById('poc_ncv_count').innerText  = d.ncv_count;
+    document.getElementById('poc_bme_valid').innerText  = d.bme.valid ? 'OK' : 'INVALID';
+    document.getElementById('poc_temp').innerText        = d.bme.temp;
+    document.getElementById('poc_hum').innerText         = d.bme.hum;
+    document.getElementById('poc_pres').innerText        = d.bme.pres;
+    document.getElementById('poc_mic_count').innerText  = d.mic_count;
+    document.getElementById('poc_tcs_valid').innerText  = d.tcs.valid ? 'OK' : 'INVALID';
+
+    document.getElementById('poc_gps_fix').innerText = d.gps.valid ? 'FIX' : 'NO FIX';
+    document.getElementById('poc_gps_latlon').innerText = d.gps.valid
+        ? `${(d.gps.lat_e6 / 1e6).toFixed(6)}, ${(d.gps.lon_e6 / 1e6).toFixed(6)}`
+        : '-';
+
+    document.getElementById('poc_group_seq').innerText = d.group_seq;
+    document.getElementById('poc_raw_size').innerText  = d.raw_packet_size;
+
+    document.getElementById('poc_ncv_raw').innerText = JSON.stringify(d.ncv, null, 2);
+    document.getElementById('poc_jsb_raw').innerText  = d.raw_text;
+
+    if (d.fusion) _renderFusion(d.fusion);
+}
+
+function _renderFusion(f) {
+    document.getElementById('fz_light_raw').innerText      = f.light.raw;
+    document.getElementById('fz_light_filtered').innerText = f.light.filtered;
+    document.getElementById('fz_light_target').innerText   = f.light.target_level;
+    document.getElementById('fz_light_level').innerText    = f.light.level;
+
+    document.getElementById('fz_rain_wet_distance').innerText = f.rain.wet_distance;
+    document.getElementById('fz_rain_wet_present').innerText  = f.rain.wet_present ? 'YES' : 'NO';
+    document.getElementById('fz_rain_event_state').innerText  = f.rain.event_state;
+    document.getElementById('fz_rain_event_count').innerText  = f.rain.event_count_window;
+    document.getElementById('fz_rain_target').innerText       = f.rain.target_level;
+    document.getElementById('fz_rain_level').innerText        = f.rain.level;
+
+    document.getElementById('fz_fog_humid_ready').innerText = f.fog.humid_ready ? 'READY' : 'GATE 잠김';
+    document.getElementById('fz_fog_score').innerText       = f.fog.score;
+    document.getElementById('fz_fog_target').innerText      = f.fog.target_level;
+    document.getElementById('fz_fog_level').innerText       = f.fog.level;
+
+    document.getElementById('fz_rs_mean').innerText       = f.ncv_features.rs_mean;
+    document.getElementById('fz_rs_variation').innerText  = f.ncv_features.rs_variation;
+    document.getElementById('fz_rs_impulse').innerText    = f.ncv_features.rs_impulse_ratio;
+    document.getElementById('fz_rs_persistence').innerText = f.ncv_features.rs_persistence;
+
+    document.getElementById('fz_mic_rms').innerText   = f.mic_feature.rms;
+    document.getElementById('fz_mic_peak').innerText  = f.mic_feature.peak;
+    document.getElementById('fz_mic_state').innerText = f.mic_feature.state;
+}
+
+function _fmtOnOff(v) {
+    if (v === 1) return 'ON';
+    if (v === 0) return 'OFF';
+    if (v === -1) return 'MIXED';
+    return '-';
+}
+
+function _renderAutoControl(a) {
+    document.getElementById('ac_mode').innerText       = a.mode;
+    document.getElementById('ac_env_level').innerText  = a.env_level;
+    document.getElementById('ac_reason').innerText     = a.reason || '-';
+
+    document.getElementById('ac_target_onoff').innerText  = _fmtOnOff(a.target_onoff);
+    document.getElementById('ac_target_bright').innerText = a.target_bright;
+
+    document.getElementById('ac_actual_onoff').innerText  = _fmtOnOff(a.actual_onoff);
+    document.getElementById('ac_actual_bright').innerText =
+        a.actual_bright === -1 ? 'MIXED' : (a.actual_bright ?? '-');
+
+    const matchEl = document.getElementById('ac_match');
+    if (a.control_match === null || a.control_match === undefined) {
+        matchEl.innerText = '-';
+    } else {
+        matchEl.innerText = a.control_match ? '✔ MATCH' : '✘ MISMATCH';
+        matchEl.style.color = a.control_match ? '#0f0' : '#f44';
+    }
+}
+
+function _renderJsbDiag(diag) {
+    document.getElementById('poc_chunks').innerText =
+        `${diag.last_chunks_received} / ${diag.last_total_chunks || '-'}`;
+    document.getElementById('poc_chunk_error').innerText  = diag.chunk_error_count;
+    document.getElementById('poc_incomplete').innerText   = diag.incomplete_group_count;
+    document.getElementById('poc_last_complete').innerText = diag.last_complete_group_seq ?? '-';
+}
+
+let _pocDiagTimer = null;
+
+function loadMonitor() {
+    if (latestJpbStatus) _renderJpbStatus(latestJpbStatus);
+    if (latestJsbSensor) _renderJsbSensor(latestJsbSensor);
+
+    const poll = () => {
+        fetch('/api/monitor')
+        .then(r => r.json())
+        .then(data => {
+            if (data.jpb) { latestJpbStatus = data.jpb; _renderJpbStatus(data.jpb); }
+            if (data.jsb) { latestJsbSensor = data.jsb; _renderJsbSensor(data.jsb); }
+            if (data.jsb_diag) _renderJsbDiag(data.jsb_diag);
+            if (data.auto) _renderAutoControl(data.auto);
+        })
+        .catch(() => {});
+    };
+
+    poll();
+    if (_pocDiagTimer) clearInterval(_pocDiagTimer);
+    _pocDiagTimer = setInterval(poll, 2000);
 }
