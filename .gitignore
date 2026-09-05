@@ -4,6 +4,16 @@ __pycache__/
 *.pyo
 venv/
 *.db
+*.db-shm
+*.db-wal
+
+# Secrets (SMTP credential 등 — 실제 파일은 /home/jb/.config/laneon/report.env에 별도 보관)
+*.env
+report.env
+.config/laneon/
+
+# 6시간 Environment Report (생성 산출물, 90일 후 자동 삭제 대상)
+reports/environment/*.md
 
 # OS
 .DS_Store

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run LANEON PoC ELMS Environment Report every 6 hours (00:05/06:05/12:05/18:05 KST)
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:05:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

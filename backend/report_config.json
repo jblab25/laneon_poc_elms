@@ -1,0 +1,16 @@
+{
+  "db_retention_days": 14,
+  "report_retention_days": 90,
+  "report_dir": "reports/environment",
+  "analysis_window_hours": 6,
+  "sensor_detail_tables": [
+    "jsb_packet_history",
+    "fusion_history",
+    "jpb_status_history",
+    "auto_control_history"
+  ],
+  "long_retention_tables": [
+    "control_event_log",
+    "test_marker"
+  ]
+}

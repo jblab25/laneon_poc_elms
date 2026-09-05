@@ -16,6 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory, make_response
 from flask_socketio import SocketIO
 
 import env_fusion
+import db_writer
 
 # ──────────────────────────────────────────
 # 설정
@@ -319,6 +320,21 @@ def _handle_jpb_status(payload: bytes):
         latest_jpb_status = status
     socketio.emit('jpb_status_update', status)
 
+    try:
+        db_writer.enqueue('jpb_status_history', {
+            'ts': status['timestamp'],
+            'jpb_seq': jpb_seq,
+            'lane1_active': int(lanes[0]['active']), 'lane1_bright': lanes[0]['bright_level'],
+            'lane1_voltage_mv': lanes[0]['voltage_mv'], 'lane1_current_ma': lanes[0]['current_ma'],
+            'lane2_active': int(lanes[1]['active']), 'lane2_bright': lanes[1]['bright_level'],
+            'lane2_voltage_mv': lanes[1]['voltage_mv'], 'lane2_current_ma': lanes[1]['current_ma'],
+            'lane3_active': int(lanes[2]['active']), 'lane3_bright': lanes[2]['bright_level'],
+            'lane3_voltage_mv': lanes[2]['voltage_mv'], 'lane3_current_ma': lanes[2]['current_ma'],
+            'jsb_link_valid': int(jsb_link_valid), 'jsb_seq': jsb_seq, 'jsb_age_ms': jsb_age_ms,
+        })
+    except Exception as e:
+        print(f'[DB_WRITER] jpb_status_history 준비 실패: {e}')
+
 
 def _handle_jsb_chunk(payload: bytes):
     """
@@ -486,9 +502,55 @@ def _process_jsb_raw_packet(raw: bytes, group_seq: int):
         fusion = env_fusion.process_jsb_packet(sensor)
         sensor['fusion'] = fusion
         send_env_status(SLAVE_ID, fusion['light']['level'], fusion['rain']['level'], fusion['fog']['level'])
-        auto_decision_step(fusion)
+        auto_decision_step(fusion, sensor.get('seq'))
     except Exception as e:
         print(f'[FUSION] 처리 실패: {e}')
+
+    try:
+        db_writer.enqueue('jsb_packet_history', {
+            'ts': sensor['timestamp'],
+            'jsb_seq': sensor.get('seq'),
+            'group_seq': group_seq,
+            'uptime': sensor.get('uptime'),
+            'ncv_count': sensor.get('ncv_count'),
+            'ncv_json': json.dumps(sensor.get('ncv', [])),
+            'bme_valid': int(sensor['bme']['valid']),
+            'bme_temp_x10': sensor['bme']['temp_x10'],
+            'bme_hum_x10': sensor['bme']['hum_x10'],
+            'bme_pres_x10': sensor['bme']['pres_x10'],
+            'mic_count': sensor.get('mic_count'),
+            'mic_json': json.dumps(sensor.get('mic', [])),
+            'tcs_valid': int(sensor['tcs']['valid']),
+            'tcs_json': json.dumps(sensor.get('tcs', {})),
+            'gps_valid': int(sensor['gps']['valid']),
+            'lat_e6': sensor['gps']['lat_e6'],
+            'lon_e6': sensor['gps']['lon_e6'],
+            'raw_packet_size': sensor.get('raw_packet_size'),
+            'chunk_error_count_cum': _jsb_diag['chunk_error_count'],
+            'incomplete_group_count_cum': _jsb_diag['incomplete_group_count'],
+        })
+        if 'fusion' in sensor:
+            f = sensor['fusion']
+            db_writer.enqueue('fusion_history', {
+                'ts': sensor['timestamp'],
+                'jsb_seq': sensor.get('seq'),
+                'mode': current_control_mode,
+                'light_raw': f['light']['raw'], 'light_filtered': f['light']['filtered'],
+                'light_target': f['light']['target_level'], 'light_level': f['light']['level'],
+                'rain_wet_distance': f['rain']['wet_distance'], 'rain_wet_present': int(f['rain']['wet_present']),
+                'rain_event_mag': f['rain']['event_mag'], 'rain_event_state': f['rain']['event_state'],
+                'rain_event_count_window': f['rain']['event_count_window'],
+                'rain_target': f['rain']['target_level'], 'rain_level': f['rain']['level'],
+                'fog_humid_ready': int(f['fog']['humid_ready']), 'fog_score': f['fog']['score'],
+                'fog_target': f['fog']['target_level'], 'fog_level': f['fog']['level'],
+                'rs_mean': f['ncv_features']['rs_mean'], 'rs_variation': f['ncv_features']['rs_variation'],
+                'rs_impulse_ratio': f['ncv_features']['rs_impulse_ratio'],
+                'rs_persistence': f['ncv_features']['rs_persistence'],
+                'mic_rms': f['mic_feature']['rms'], 'mic_peak': f['mic_feature']['peak'],
+                'mic_state': f['mic_feature']['state'],
+            })
+    except Exception as e:
+        print(f'[DB_WRITER] jsb/fusion history 준비 실패: {e}')
 
     global latest_jsb_sensor
     with _state_lock:
@@ -500,16 +562,33 @@ def _process_jsb_raw_packet(raw: bytes, group_seq: int):
 # JPB 공통 송신 함수 — MANUAL Route와 AUTO Decision이 동일 함수를 사용한다.
 # Wire Protocol/기존 MANUAL API 동작은 변경하지 않는다(기존 payload 그대로).
 # ──────────────────────────────────────────
+def _log_control_event(event_type: str, lanes, value, reason: str = ''):
+    try:
+        db_writer.enqueue('control_event_log', {
+            'ts': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'mode': current_control_mode,
+            'event_type': event_type,
+            'lanes': lanes,
+            'value': value,
+            'reason': reason,
+        })
+    except Exception as e:
+        print(f'[DB_WRITER] control_event_log 준비 실패: {e}')
+
+
 def send_mode(slave_id: int, mode: int):
     uart_send(CMD_MODE, bytes([slave_id, mode]))
+    _log_control_event('MODE_CHANGE', None, mode)
 
 
 def send_lane_onoff(slave_id: int, lanes: int, on: int):
     uart_send(CMD_ONOFF, bytes([slave_id, lanes, on]))
+    _log_control_event('ONOFF', lanes, on)
 
 
 def send_lane_brightness(slave_id: int, lane: int, value: int):
     uart_send(CMD_BRIGHTNESS, bytes([slave_id, lane, value]))
+    _log_control_event('BRIGHTNESS', lane, value)
 
 
 def send_env_status(slave_id: int, light_level: int, rain_level: int, fog_level: int):
@@ -534,7 +613,24 @@ _auto_state = {
 }
 
 
-def auto_decision_step(fusion: dict):
+def _compute_actual_state(jpb: dict):
+    """JPB 0x30 최신 상태에서 3-Lane 종합 ON/OFF·Brightness를 뽑는다.
+    3개 Lane 상태가 혼재(과도상태 등)하면 -1로 표시한다. /api/monitor와 DB 기록이 공유."""
+    if jpb is None:
+        return None, None
+    lanes_active = [jpb['lane1']['active'], jpb['lane2']['active'], jpb['lane3']['active']]
+    lanes_bright = [jpb['lane1']['bright_level'], jpb['lane2']['bright_level'], jpb['lane3']['bright_level']]
+    if all(lanes_active):
+        actual_onoff = 1
+    elif not any(lanes_active):
+        actual_onoff = 0
+    else:
+        actual_onoff = -1
+    actual_bright = lanes_bright[0] if len(set(lanes_bright)) == 1 else -1
+    return actual_onoff, actual_bright
+
+
+def auto_decision_step(fusion: dict, jsb_seq=None):
     light = fusion['light']['level']
     rain  = fusion['rain']['level']
     fog   = fusion['fog']['level']
@@ -550,29 +646,49 @@ def auto_decision_step(fusion: dict):
         _auto_state['target_bright'] = target_bright
         _auto_state['reason']        = reason
 
-        if current_control_mode != 'AUTO':
-            return  # MANUAL에서는 계산만 하고 절대 송신하지 않는다
+        if current_control_mode == 'AUTO':
+            prev_onoff  = _auto_state['sent_onoff']
+            prev_bright = _auto_state['sent_bright']
 
-        prev_onoff  = _auto_state['sent_onoff']
-        prev_bright = _auto_state['sent_bright']
-
-        if target_onoff != prev_onoff:
-            if target_onoff == 1:
-                # OFF->ON: Lane1~3 Brightness 먼저, 그 다음 CMD_ONOFF(lanes=0x07, ON)
+            if target_onoff != prev_onoff:
+                if target_onoff == 1:
+                    # OFF->ON: Lane1~3 Brightness 먼저, 그 다음 CMD_ONOFF(lanes=0x07, ON)
+                    for lane in (1, 2, 3):
+                        send_lane_brightness(SLAVE_ID, lane, target_bright)
+                    send_lane_onoff(SLAVE_ID, 0x07, 1)
+                    _auto_state['sent_bright'] = target_bright
+                else:
+                    # ON->OFF: CMD_ONOFF(lanes=0x07, OFF)만 전송
+                    send_lane_onoff(SLAVE_ID, 0x07, 0)
+                _auto_state['sent_onoff'] = target_onoff
+            elif target_onoff == 1 and target_bright != prev_bright:
+                # 이미 ON인 상태에서 밝기만 바뀐 경우 -> ON/OFF는 재전송하지 않는다
                 for lane in (1, 2, 3):
                     send_lane_brightness(SLAVE_ID, lane, target_bright)
-                send_lane_onoff(SLAVE_ID, 0x07, 1)
                 _auto_state['sent_bright'] = target_bright
-            else:
-                # ON->OFF: CMD_ONOFF(lanes=0x07, OFF)만 전송
-                send_lane_onoff(SLAVE_ID, 0x07, 0)
-            _auto_state['sent_onoff'] = target_onoff
-        elif target_onoff == 1 and target_bright != prev_bright:
-            # 이미 ON인 상태에서 밝기만 바뀐 경우 -> ON/OFF는 재전송하지 않는다
-            for lane in (1, 2, 3):
-                send_lane_brightness(SLAVE_ID, lane, target_bright)
-            _auto_state['sent_bright'] = target_bright
-        # else: target 변화 없음 -> 아무 것도 보내지 않는다
+            # else: target 변화 없음 -> 아무 것도 보내지 않는다
+
+    try:
+        with _state_lock:
+            jpb_snapshot = dict(latest_jpb_status) if latest_jpb_status else None
+        actual_onoff, actual_bright = _compute_actual_state(jpb_snapshot)
+        control_match = None
+        if actual_onoff is not None:
+            control_match = int((actual_onoff == target_onoff) and
+                                 (target_onoff == 0 or actual_bright == target_bright))
+        db_writer.enqueue('auto_control_history', {
+            'ts': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'jsb_seq': jsb_seq,
+            'mode': current_control_mode,
+            'env_level': env_level,
+            'target_onoff': target_onoff,
+            'target_bright': target_bright,
+            'actual_onoff': actual_onoff,
+            'actual_bright': actual_bright,
+            'control_match': control_match,
+        })
+    except Exception as e:
+        print(f'[DB_WRITER] auto_control_history 준비 실패: {e}')
 
 
 # ──────────────────────────────────────────
@@ -1084,6 +1200,24 @@ def api_schedule_set():
 
 
 # ──────────────────────────────────────────
+# REST API — 외부테스트 Test Marker (6시간 Report에서 센서 변화와 함께 표시)
+# ──────────────────────────────────────────
+@app.route('/api/test_marker', methods=['POST'])
+def api_test_marker():
+    d     = request.json or {}
+    label = str(d.get('label', '')).strip()
+    memo  = str(d.get('memo', '')).strip()
+    if not label:
+        return jsonify({'ok': False, 'error': 'label required'}), 400
+    db_writer.enqueue('test_marker', {
+        'ts': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'label': label,
+        'memo': memo,
+    })
+    return jsonify({'ok': True})
+
+
+# ──────────────────────────────────────────
 # REST API — PoC Monitor (JPB STATUS / JSB SENSOR)
 # ──────────────────────────────────────────
 @app.route('/api/monitor')
@@ -1098,20 +1232,9 @@ def api_monitor():
         auto = dict(_auto_state)
         auto['mode'] = current_control_mode
 
-    actual_onoff = None
-    actual_bright = None
+    actual_onoff, actual_bright = _compute_actual_state(jpb)
     control_match = None
-    if jpb is not None:
-        lanes_active = [jpb['lane1']['active'], jpb['lane2']['active'], jpb['lane3']['active']]
-        lanes_bright = [jpb['lane1']['bright_level'], jpb['lane2']['bright_level'], jpb['lane3']['bright_level']]
-        if all(lanes_active):
-            actual_onoff = 1
-        elif not any(lanes_active):
-            actual_onoff = 0
-        else:
-            actual_onoff = -1  # 3개 Lane 상태가 혼재(전환 중 과도상태 등)
-        actual_bright = lanes_bright[0] if len(set(lanes_bright)) == 1 else -1
-
+    if actual_onoff is not None:
         control_match = (actual_onoff == auto['target_onoff']) and (
             auto['target_onoff'] == 0 or actual_bright == auto['target_bright']
         )
@@ -1119,6 +1242,7 @@ def api_monitor():
     auto['actual_onoff']   = actual_onoff
     auto['actual_bright']  = actual_bright
     auto['control_match']  = control_match
+    auto['db_queue_drop_count'] = db_writer.get_drop_count()
 
     return jsonify({'jpb': jpb, 'jsb': jsb, 'jsb_diag': diag, 'auto': auto})
 
@@ -1154,6 +1278,7 @@ def on_disconnect():
 # ──────────────────────────────────────────
 if __name__ == '__main__':
     init_db()
+    db_writer.start(DB_PATH)
     init_mqtt()
     threading.Thread(target=uart_reader,     daemon=True).start()
     threading.Thread(target=status_poller,   daemon=True).start()

@@ -1,0 +1,10 @@
+[Unit]
+Description=LANEON PoC ELMS DB Retention Cleanup (14-day rolling)
+After=network.target
+
+[Service]
+Type=oneshot
+User=jb
+WorkingDirectory=/home/jb/Dev/ELMS_PoC/backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/jb/Dev/ELMS_PoC/backend/venv/bin/python3 db_retention.py

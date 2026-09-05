@@ -1,0 +1,10 @@
+[Unit]
+Description=Run LANEON PoC ELMS DB Retention Cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Asia/Seoul
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
