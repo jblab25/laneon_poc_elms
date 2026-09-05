@@ -61,15 +61,30 @@ socket.on('status_update', (data) => {
 });
 
 /* ──────────────────────────────────────────
+   전압 -> 밝기 단계 변환 (JPB 실측 캘리브레이션 기준)
+   Lv1: 19.70~19.79V, Lv2: 19.80~19.89V, Lv3: 19.90~19.99V, Lv4: 20.00~20.10V
+   JPB가 보고하는 raw brightness index 대신, 실제 측정 전압을 이 구간표에
+   대입해 계산한 값을 화면에 표시한다(둘이 어긋나 보이는 걸 방지하기 위함).
+   ────────────────────────────────────────── */
+function voltageToBrightnessLevel(voltage) {
+    if (voltage >= 20.00) return 4;
+    if (voltage >= 19.90) return 3;
+    if (voltage >= 19.80) return 2;
+    if (voltage >= 19.70) return 1;
+    return 0;
+}
+
+/* ──────────────────────────────────────────
    대시보드 카드 업데이트
    ────────────────────────────────────────── */
 function _updateCards(d) {
     for (let i = 1; i <= 3; i++) {
-        const v   = d.voltage[i - 1].toFixed(2);
-        const cur = d.current[i - 1].toFixed(3);
-        const on  = (d.lane_state >> (i - 1)) & 1 ? 'ON' : 'OFF';
+        const vNum = d.voltage[i - 1];
+        const v    = vNum.toFixed(2);
+        const cur  = d.current[i - 1].toFixed(3);
+        const on   = (d.lane_state >> (i - 1)) & 1 ? 'ON' : 'OFF';
 
-        const bright = d.brightness ? (d.brightness[i - 1] || 0) : 0;
+        const bright = voltageToBrightnessLevel(vNum);
         document.getElementById(`lane${i}_voltage`).innerText    = v;
         document.getElementById(`lane${i}_current`).innerText    = cur;
         document.getElementById(`lane${i}_on`).innerText         = on;
@@ -356,11 +371,12 @@ function _renderJpbStatus(d) {
     document.getElementById('poc_jsb_age').innerText   = d.jsb_age_ms;
 
     ['lane1', 'lane2', 'lane3'].forEach((key, i) => {
-        const n    = i + 1;
-        const lane = d[key];
+        const n       = i + 1;
+        const lane    = d[key];
+        const voltage = lane.voltage_mv / 1000;
         document.getElementById(`poc_lane${n}_active`).innerText  = lane.active ? 'ON' : 'OFF';
-        document.getElementById(`poc_lane${n}_bright`).innerText  = lane.bright_level;
-        document.getElementById(`poc_lane${n}_voltage`).innerText = (lane.voltage_mv / 1000).toFixed(2);
+        document.getElementById(`poc_lane${n}_bright`).innerText  = voltageToBrightnessLevel(voltage);
+        document.getElementById(`poc_lane${n}_voltage`).innerText = voltage.toFixed(2);
         document.getElementById(`poc_lane${n}_current`).innerText = lane.current_ma;
     });
 }
