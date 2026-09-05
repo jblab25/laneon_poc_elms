@@ -62,12 +62,12 @@ socket.on('status_update', (data) => {
 
 /* ──────────────────────────────────────────
    전압 -> 밝기 단계 변환 (JPB 실측 캘리브레이션 기준)
-   Lv1: 19.70~19.79V, Lv2: 19.80~19.89V, Lv3: 19.90~19.99V, Lv4: 20.00~20.10V
+   Lv1: 19.70~19.79V, Lv2: 19.80~19.89V, Lv3: 19.90~20.09V, Lv4: 20.10~20.19V
    JPB가 보고하는 raw brightness index 대신, 실제 측정 전압을 이 구간표에
    대입해 계산한 값을 화면에 표시한다(둘이 어긋나 보이는 걸 방지하기 위함).
    ────────────────────────────────────────── */
 function voltageToBrightnessLevel(voltage) {
-    if (voltage >= 20.00) return 4;
+    if (voltage >= 20.10) return 4;
     if (voltage >= 19.90) return 3;
     if (voltage >= 19.80) return 2;
     if (voltage >= 19.70) return 1;
